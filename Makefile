@@ -23,6 +23,7 @@ help:
 	@echo "  apidocs-gen    generate api docs HTML"
 	@echo "  binaries       build binaries for all platforms"
 	@echo "  dockerhub      build and push images to Docker Hub"
+	@echo "  docker			build docker image locally"
 	@echo ""
 
 blank :=
