@@ -345,8 +345,12 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 	pcConnected := make(chan struct{})
 	pcDisconnected := make(chan struct{})
 	pcClosed := make(chan struct{})
+	var stateChangeMutex sync.Mutex
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		stateChangeMutex.Lock()
+		defer stateChangeMutex.Unlock()
+
 		select {
 		case <-pcClosed:
 			return
@@ -507,7 +511,7 @@ outer:
 	defer res.stream.readerRemove(c)
 
 	c.log(logger.Info, "is reading from path '%s', %s",
-		path.Name(), sourceMediaInfo(gatherMedias(tracks)))
+		path.name, sourceMediaInfo(gatherMedias(tracks)))
 
 	go func() {
 		for {

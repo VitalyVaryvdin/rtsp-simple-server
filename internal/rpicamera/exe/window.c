@@ -1,9 +1,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "roi.h"
+#include "window.h"
 
-bool roi_load(const char *encoded, roi_t **mode) {
+bool window_load(const char *encoded, window_t *window) {
     float vals[4];
     int i = 0;
     char *token = strtok((char *)encoded, ",");
@@ -21,10 +21,10 @@ bool roi_load(const char *encoded, roi_t **mode) {
         return false;
     }
 
-    *mode = malloc(sizeof(roi_t));
-    (*mode)->x = vals[0];
-    (*mode)->y = vals[1];
-    (*mode)->width = vals[2];
-    (*mode)->height = vals[3];
+    window->x = vals[0];
+    window->y = vals[1];
+    window->width = vals[2];
+    window->height = vals[3];
+
     return true;
 }

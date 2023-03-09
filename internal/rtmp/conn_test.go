@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/aler9/gortsplib/v2/pkg/codecs/h264"
 	"github.com/aler9/gortsplib/v2/pkg/codecs/mpeg4audio"
@@ -259,7 +260,11 @@ func TestInitializeClient(t *testing.T) {
 }
 
 func TestInitializeServer(t *testing.T) {
-	for _, ca := range []string{"read", "publish"} {
+	for _, ca := range []string{
+		"read",
+		"publish",
+		"publish neko",
+	} {
 		t.Run(ca, func(t *testing.T) {
 			ln, err := net.Listen("tcp", "127.0.0.1:9121")
 			require.NoError(t, err)
@@ -280,7 +285,7 @@ func TestInitializeServer(t *testing.T) {
 					Host:   "127.0.0.1:9121",
 					Path:   "//stream/",
 				}, u)
-				require.Equal(t, ca == "publish", isPublishing)
+				require.Equal(t, ca == "publish" || ca == "publish neko", isPublishing)
 
 				close(done)
 			}()
@@ -295,6 +300,11 @@ func TestInitializeServer(t *testing.T) {
 
 			mrw := message.NewReadWriter(bc, true)
 
+			tcURL := "rtmp://127.0.0.1:9121/stream"
+			if ca == "publish neko" {
+				tcURL = "'rtmp://127.0.0.1:9121/stream"
+			}
+
 			err = mrw.Write(&message.MsgCommandAMF0{
 				ChunkStreamID: 3,
 				Name:          "connect",
@@ -303,7 +313,7 @@ func TestInitializeServer(t *testing.T) {
 					flvio.AMFMap{
 						{K: "app", V: "/stream"},
 						{K: "flashVer", V: "LNX 9,0,124,2"},
-						{K: "tcUrl", V: "rtmp://127.0.0.1:9121/stream"},
+						{K: "tcUrl", V: tcURL},
 						{K: "fpad", V: false},
 						{K: "capabilities", V: 15},
 						{K: "audioCodecs", V: 4071},
@@ -528,13 +538,28 @@ func TestReadTracks(t *testing.T) {
 			},
 		},
 		{
-			"missing metadata",
+			"missing metadata, video+audio",
 			&format.H264{
 				PayloadTyp:        96,
 				SPS:               sps,
 				PPS:               pps,
 				PacketizationMode: 1,
 			},
+			&format.MPEG4Audio{
+				PayloadTyp: 96,
+				Config: &mpeg4audio.Config{
+					Type:         2,
+					SampleRate:   44100,
+					ChannelCount: 2,
+				},
+				SizeLength:       13,
+				IndexLength:      3,
+				IndexDeltaLength: 3,
+			},
+		},
+		{
+			"missing metadata, audio",
+			nil,
 			&format.MPEG4Audio{
 				PayloadTyp: 96,
 				Config: &mpeg4audio.Config{
@@ -787,6 +812,7 @@ func TestReadTracks(t *testing.T) {
 					SPS: sps,
 					PPS: pps,
 				}.Marshal()
+
 				err = mrw.Write(&message.MsgVideo{
 					ChunkStreamID:   message.MsgVideoChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -802,6 +828,7 @@ func TestReadTracks(t *testing.T) {
 					ChannelCount: 2,
 				}.Marshal()
 				require.NoError(t, err)
+
 				err = mrw.Write(&message.MsgAudio{
 					ChunkStreamID:   message.MsgAudioChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -846,6 +873,7 @@ func TestReadTracks(t *testing.T) {
 					SPS: sps,
 					PPS: pps,
 				}.Marshal()
+
 				err = mrw.Write(&message.MsgVideo{
 					ChunkStreamID:   message.MsgVideoChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -884,6 +912,7 @@ func TestReadTracks(t *testing.T) {
 					SPS: sps,
 					PPS: pps,
 				}.Marshal()
+
 				err = mrw.Write(&message.MsgVideo{
 					ChunkStreamID:   message.MsgVideoChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -899,6 +928,7 @@ func TestReadTracks(t *testing.T) {
 					ChannelCount: 2,
 				}.Marshal()
 				require.NoError(t, err)
+
 				err = mrw.Write(&message.MsgAudio{
 					ChunkStreamID:   message.MsgAudioChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -910,11 +940,12 @@ func TestReadTracks(t *testing.T) {
 				})
 				require.NoError(t, err)
 
-			case "missing metadata":
+			case "missing metadata, video+audio":
 				buf, _ := h264conf.Conf{
 					SPS: sps,
 					PPS: pps,
 				}.Marshal()
+
 				err = mrw.Write(&message.MsgVideo{
 					ChunkStreamID:   message.MsgVideoChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -930,6 +961,7 @@ func TestReadTracks(t *testing.T) {
 					ChannelCount: 2,
 				}.Marshal()
 				require.NoError(t, err)
+
 				err = mrw.Write(&message.MsgAudio{
 					ChunkStreamID:   message.MsgAudioChunkStreamID,
 					MessageStreamID: 0x1000000,
@@ -938,6 +970,37 @@ func TestReadTracks(t *testing.T) {
 					Channels:        flvio.SOUND_STEREO,
 					AACType:         flvio.AAC_SEQHDR,
 					Payload:         enc,
+				})
+				require.NoError(t, err)
+
+			case "missing metadata, audio":
+				enc, err := mpeg4audio.Config{
+					Type:         2,
+					SampleRate:   44100,
+					ChannelCount: 2,
+				}.Marshal()
+				require.NoError(t, err)
+
+				err = mrw.Write(&message.MsgAudio{
+					ChunkStreamID:   message.MsgAudioChunkStreamID,
+					MessageStreamID: 0x1000000,
+					Rate:            flvio.SOUND_44Khz,
+					Depth:           flvio.SOUND_16BIT,
+					Channels:        flvio.SOUND_STEREO,
+					AACType:         flvio.AAC_SEQHDR,
+					Payload:         enc,
+				})
+				require.NoError(t, err)
+
+				err = mrw.Write(&message.MsgAudio{
+					ChunkStreamID:   message.MsgAudioChunkStreamID,
+					MessageStreamID: 0x1000000,
+					Rate:            flvio.SOUND_44Khz,
+					Depth:           flvio.SOUND_16BIT,
+					Channels:        flvio.SOUND_STEREO,
+					AACType:         flvio.AAC_SEQHDR,
+					Payload:         enc,
+					DTS:             1 * time.Second,
 				})
 				require.NoError(t, err)
 
@@ -1008,6 +1071,7 @@ func TestReadTracks(t *testing.T) {
 					ChannelCount: 2,
 				}.Marshal()
 				require.NoError(t, err)
+
 				err = mrw.Write(&message.MsgAudio{
 					ChunkStreamID:   message.MsgAudioChunkStreamID,
 					MessageStreamID: 0x1000000,

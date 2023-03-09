@@ -1,9 +1,10 @@
 #ifndef __PARAMETERS_H__
 #define __PARAMETERS_H__
 
+#include <stdint.h>
 #include <stdbool.h>
 
-#include "roi.h"
+#include "window.h"
 #include "sensor_mode.h"
 
 typedef struct {
@@ -16,21 +17,26 @@ typedef struct {
     float contrast;
     float saturation;
     float sharpness;
-    const char *exposure;
-    const char *awb;
-    const char *denoise;
+    char *exposure;
+    char *awb;
+    char *denoise;
     unsigned int shutter;
-    const char *metering;
+    char *metering;
     float gain;
     float ev;
-    roi_t *roi;
-    const char *tuning_file;
+    window_t *roi;
+    char *tuning_file;
     sensor_mode_t *mode;
     unsigned int fps;
     unsigned int idr_period;
     unsigned int bitrate;
     unsigned int profile;
     unsigned int level;
+    char *af_mode;
+    char *af_range;
+    char *af_speed;
+    float lens_position;
+    window_t *af_window;
 
     // private
     unsigned int buffer_count;
@@ -42,7 +48,8 @@ extern "C" {
 #endif
 
 const char *parameters_get_error();
-bool parameters_load(parameters_t *params);
+bool parameters_unserialize(parameters_t *params, const uint8_t *buf, size_t buf_size);
+void parameters_destroy(parameters_t *params);
 
 #ifdef __cplusplus
 }

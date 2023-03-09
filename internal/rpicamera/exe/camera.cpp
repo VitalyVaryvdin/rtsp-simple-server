@@ -3,6 +3,7 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <iostream>
+#include <mutex>
 
 #include <libcamera/camera_manager.h>
 #include <libcamera/camera.h>
@@ -19,11 +20,14 @@
 using libcamera::CameraManager;
 using libcamera::CameraConfiguration;
 using libcamera::Camera;
+using libcamera::ColorSpace;
 using libcamera::ControlList;
 using libcamera::FrameBufferAllocator;
 using libcamera::FrameBuffer;
+using libcamera::PixelFormat;
 using libcamera::Rectangle;
 using libcamera::Request;
+using libcamera::Size;
 using libcamera::Span;
 using libcamera::Stream;
 using libcamera::StreamRoles;
@@ -48,8 +52,8 @@ const char *camera_get_error() {
 }
 
 // https://github.com/raspberrypi/libcamera-apps/blob/dd97618a25523c2c4aa58f87af5f23e49aa6069c/core/libcamera_app.cpp#L42
-static libcamera::PixelFormat mode_to_pixel_format(sensor_mode_t *mode) {
-    static std::vector<std::pair<std::pair<int, bool>, libcamera::PixelFormat>> table = {
+static PixelFormat mode_to_pixel_format(sensor_mode_t *mode) {
+    static std::vector<std::pair<std::pair<int, bool>, PixelFormat>> table = {
         { {8, false}, formats::SBGGR8 },
         { {8, true}, formats::SBGGR8 },
         { {10, false}, formats::SBGGR10 },
@@ -68,23 +72,25 @@ static libcamera::PixelFormat mode_to_pixel_format(sensor_mode_t *mode) {
 }
 
 struct CameraPriv {
-    parameters_t *params;
+    const parameters_t *params;
     camera_frame_cb frame_cb;
     std::unique_ptr<CameraManager> camera_manager;
     std::shared_ptr<Camera> camera;
     Stream *video_stream;
     std::unique_ptr<FrameBufferAllocator> allocator;
     std::vector<std::unique_ptr<Request>> requests;
+    std::mutex ctrls_mutex;
+    std::unique_ptr<ControlList> ctrls;
 };
 
-static int get_v4l2_colorspace(std::optional<libcamera::ColorSpace> const &cs) {
-    if (cs == libcamera::ColorSpace::Rec709) {
+static int get_v4l2_colorspace(std::optional<ColorSpace> const &cs) {
+    if (cs == ColorSpace::Rec709) {
         return V4L2_COLORSPACE_REC709;
     }
     return V4L2_COLORSPACE_SMPTE170M;
 }
 
-bool camera_create(parameters_t *params, camera_frame_cb frame_cb, camera_t **cam) {
+bool camera_create(const parameters_t *params, camera_frame_cb frame_cb, camera_t **cam) {
     // We make sure to set the environment variable before libcamera init
     setenv("LIBCAMERA_RPI_TUNING_FILE", params->tuning_file, 1);
 
@@ -97,7 +103,7 @@ bool camera_create(parameters_t *params, camera_frame_cb frame_cb, camera_t **ca
         return false;
     }
 
-    std::vector<std::shared_ptr<libcamera::Camera>> cameras = camp->camera_manager->cameras();
+    std::vector<std::shared_ptr<Camera>> cameras = camp->camera_manager->cameras();
     auto rem = std::remove_if(cameras.begin(), cameras.end(),
         [](auto &cam) { return cam->id().find("/usb") != std::string::npos; });
     cameras.erase(rem, cameras.end());
@@ -130,19 +136,18 @@ bool camera_create(parameters_t *params, camera_frame_cb frame_cb, camera_t **ca
     }
 
     StreamConfiguration &video_stream_conf = conf->at(0);
+    video_stream_conf.size = libcamera::Size(params->width, params->height);
     video_stream_conf.pixelFormat = formats::YUV420;
     video_stream_conf.bufferCount = params->buffer_count;
-    video_stream_conf.size.width = params->width;
-    video_stream_conf.size.height = params->height;
     if (params->width >= 1280 || params->height >= 720) {
-        video_stream_conf.colorSpace = libcamera::ColorSpace::Rec709;
+        video_stream_conf.colorSpace = ColorSpace::Rec709;
     } else {
-        video_stream_conf.colorSpace = libcamera::ColorSpace::Smpte170m;
+        video_stream_conf.colorSpace = ColorSpace::Smpte170m;
     }
 
     if (params->mode != NULL) {
         StreamConfiguration &raw_stream_conf = conf->at(1);
-        raw_stream_conf.size = libcamera::Size(params->mode->width, params->mode->height);
+        raw_stream_conf.size = Size(params->mode->width, params->mode->height);
         raw_stream_conf.pixelFormat = mode_to_pixel_format(params->mode);
         raw_stream_conf.bufferCount = video_stream_conf.bufferCount;
     }
@@ -169,27 +174,33 @@ bool camera_create(parameters_t *params, camera_frame_cb frame_cb, camera_t **ca
 
     camp->video_stream = video_stream_conf.stream();
 
-    camp->allocator = std::make_unique<FrameBufferAllocator>(camp->camera);
-    res = camp->allocator->allocate(camp->video_stream);
-    if (res < 0) {
-        set_error("allocate() failed");
-        return false;
-    }
-
-    for (const std::unique_ptr<FrameBuffer> &buffer : camp->allocator->buffers(camp->video_stream)) {
+    for (unsigned int i = 0; i < params->buffer_count; i++) {
         std::unique_ptr<Request> request = camp->camera->createRequest((uint64_t)camp.get());
         if (request == NULL) {
             set_error("createRequest() failed");
             return false;
         }
+        camp->requests.push_back(std::move(request));
+    }
 
-        int res = request->addBuffer(camp->video_stream, buffer.get());
-        if (res != 0) {
-            set_error("addBuffer() failed");
+    camp->allocator = std::make_unique<FrameBufferAllocator>(camp->camera);
+    for (StreamConfiguration &stream_conf : *conf) {
+        Stream *stream = stream_conf.stream();
+
+        res = camp->allocator->allocate(stream);
+        if (res < 0) {
+            set_error("allocate() failed");
             return false;
         }
 
-        camp->requests.push_back(std::move(request));
+        int i = 0;
+        for (const std::unique_ptr<FrameBuffer> &buffer : camp->allocator->buffers(stream)) {
+            res = camp->requests.at(i++)->addBuffer(stream, buffer.get());
+            if (res != 0) {
+                set_error("addBuffer() failed");
+                return false;
+            }
+        }
     }
 
     camp->params = params;
@@ -206,16 +217,22 @@ static void on_request_complete(Request *request) {
 
     CameraPriv *camp = (CameraPriv *)request->cookie();
 
-    FrameBuffer *buffer = request->buffers().begin()->second;
-
+    FrameBuffer *buffer = request->buffers().at(camp->video_stream);
     int size = 0;
     for (const FrameBuffer::Plane &plane : buffer->planes()) {
         size += plane.length;
     }
-
-    camp->frame_cb(buffer->planes()[0].fd.get(), size, buffer->metadata().timestamp / 1000);
+    uint64_t ts = buffer->metadata().timestamp / 1000;
+    camp->frame_cb(buffer->planes()[0].fd.get(), size, ts);
 
     request->reuse(Request::ReuseFlag::ReuseBuffers);
+
+    {
+        std::lock_guard<std::mutex> lock(camp->ctrls_mutex);
+        request->controls() = *camp->ctrls;
+        camp->ctrls->clear();
+    }
+
     camp->camera->queueRequest(request);
 }
 
@@ -229,81 +246,122 @@ int camera_get_mode_colorspace(camera_t *cam) {
     return get_v4l2_colorspace(camp->video_stream->configuration().colorSpace);
 }
 
-bool camera_start(camera_t *cam) {
-    CameraPriv *camp = (CameraPriv *)cam;
-
-    ControlList ctrls = ControlList(controls::controls);
-
-    ctrls.set(controls::Brightness, camp->params->brightness);
-    ctrls.set(controls::Contrast, camp->params->contrast);
-    ctrls.set(controls::Saturation, camp->params->saturation);
-    ctrls.set(controls::Sharpness, camp->params->sharpness);
+static void fill_dynamic_controls(ControlList *ctrls, const parameters_t *params) {
+    ctrls->set(controls::Brightness, params->brightness);
+    ctrls->set(controls::Contrast, params->contrast);
+    ctrls->set(controls::Saturation, params->saturation);
+    ctrls->set(controls::Sharpness, params->sharpness);
 
     int exposure_mode;
-    if (strcmp(camp->params->exposure, "short") == 0) {
+    if (strcmp(params->exposure, "short") == 0) {
         exposure_mode = controls::ExposureShort;
-    } else if (strcmp(camp->params->exposure, "long") == 0) {
+    } else if (strcmp(params->exposure, "long") == 0) {
         exposure_mode = controls::ExposureLong;
-    } else if (strcmp(camp->params->exposure, "custom") == 0) {
+    } else if (strcmp(params->exposure, "custom") == 0) {
         exposure_mode = controls::ExposureCustom;
     } else {
         exposure_mode = controls::ExposureNormal;
     }
-    ctrls.set(controls::AeExposureMode, exposure_mode);
+    ctrls->set(controls::AeExposureMode, exposure_mode);
 
     int awb_mode;
-    if (strcmp(camp->params->awb, "incandescent") == 0) {
+    if (strcmp(params->awb, "incandescent") == 0) {
         awb_mode = controls::AwbIncandescent;
-    } else if (strcmp(camp->params->awb, "tungsten") == 0) {
+    } else if (strcmp(params->awb, "tungsten") == 0) {
         awb_mode = controls::AwbTungsten;
-    } else if (strcmp(camp->params->awb, "fluorescent") == 0) {
+    } else if (strcmp(params->awb, "fluorescent") == 0) {
         awb_mode = controls::AwbFluorescent;
-    } else if (strcmp(camp->params->awb, "indoor") == 0) {
+    } else if (strcmp(params->awb, "indoor") == 0) {
         awb_mode = controls::AwbIndoor;
-    } else if (strcmp(camp->params->awb, "daylight") == 0) {
+    } else if (strcmp(params->awb, "daylight") == 0) {
         awb_mode = controls::AwbDaylight;
-    } else if (strcmp(camp->params->awb, "cloudy") == 0) {
+    } else if (strcmp(params->awb, "cloudy") == 0) {
         awb_mode = controls::AwbCloudy;
-    } else if (strcmp(camp->params->awb, "custom") == 0) {
+    } else if (strcmp(params->awb, "custom") == 0) {
         awb_mode = controls::AwbCustom;
     } else {
         awb_mode = controls::AwbAuto;
     }
-    ctrls.set(controls::AwbMode, awb_mode);
+    ctrls->set(controls::AwbMode, awb_mode);
 
     int denoise_mode;
-    if (strcmp(camp->params->denoise, "off") == 0) {
-        denoise_mode = controls::draft::NoiseReductionModeOff;
-    } else if (strcmp(camp->params->denoise, "cdn_off") == 0) {
+    if (strcmp(params->denoise, "cdn_off") == 0) {
         denoise_mode = controls::draft::NoiseReductionModeMinimal;
-    } if (strcmp(camp->params->denoise, "cdn_hq") == 0) {
+    } else if (strcmp(params->denoise, "cdn_hq") == 0) {
         denoise_mode = controls::draft::NoiseReductionModeHighQuality;
-    } else {
+    } else if (strcmp(params->denoise, "cdn_fast") == 0) {
         denoise_mode = controls::draft::NoiseReductionModeFast;
+    } else {
+        denoise_mode = controls::draft::NoiseReductionModeOff;
     }
-    ctrls.set(controls::draft::NoiseReductionMode, denoise_mode);
+    ctrls->set(controls::draft::NoiseReductionMode, denoise_mode);
 
-    if (camp->params->shutter != 0) {
-        ctrls.set(controls::ExposureTime, camp->params->shutter);
-    }
+    ctrls->set(controls::ExposureTime, params->shutter);
 
     int metering_mode;
-    if (strcmp(camp->params->metering, "spot") == 0) {
+    if (strcmp(params->metering, "spot") == 0) {
         metering_mode = controls::MeteringSpot;
-    } else if (strcmp(camp->params->metering, "matrix") == 0) {
+    } else if (strcmp(params->metering, "matrix") == 0) {
         metering_mode = controls::MeteringMatrix;
-    } else if (strcmp(camp->params->metering, "custom") == 0) {
+    } else if (strcmp(params->metering, "custom") == 0) {
         metering_mode = controls::MeteringCustom;
     } else {
         metering_mode = controls::MeteringCentreWeighted;
     }
-    ctrls.set(controls::AeMeteringMode, metering_mode);
+    ctrls->set(controls::AeMeteringMode, metering_mode);
 
-    if (camp->params->gain > 0) {
-        ctrls.set(controls::AnalogueGain, camp->params->gain);
+    ctrls->set(controls::AnalogueGain, params->gain);
+
+    ctrls->set(controls::ExposureValue, params->ev);
+
+    int64_t frame_time = 1000000 / params->fps;
+    ctrls->set(controls::FrameDurationLimits, Span<const int64_t, 2>({ frame_time, frame_time }));
+}
+
+bool camera_start(camera_t *cam) {
+    CameraPriv *camp = (CameraPriv *)cam;
+
+    camp->ctrls = std::make_unique<ControlList>(controls::controls);
+
+    fill_dynamic_controls(camp->ctrls.get(), camp->params);
+
+    if (camp->camera->controls().count(&controls::AfMode) > 0) {
+        int af_mode;
+        if (strcmp(camp->params->af_mode, "manual") == 0) {
+            af_mode = controls::AfModeManual;
+        } else if (strcmp(camp->params->af_mode, "continuous") == 0) {
+            af_mode = controls::AfModeContinuous;
+        } else {
+            af_mode = controls::AfModeAuto;
+        }
+        camp->ctrls->set(controls::AfMode, af_mode);
+
+        if (af_mode == controls::AfModeManual) {
+            camp->ctrls->set(controls::LensPosition, camp->params->lens_position);
+        }
     }
 
-    ctrls.set(controls::ExposureValue, camp->params->ev);
+    if (camp->camera->controls().count(&controls::AfRange) > 0) {
+        int af_range;
+        if (strcmp(camp->params->af_range, "macro") == 0) {
+            af_range = controls::AfRangeMacro;
+        } else if (strcmp(camp->params->af_range, "full") == 0) {
+            af_range = controls::AfRangeFull;
+        } else {
+            af_range = controls::AfRangeNormal;
+        }
+        camp->ctrls->set(controls::AfRange, af_range);
+    }
+
+    if (camp->camera->controls().count(&controls::AfSpeed) > 0) {
+        int af_speed;
+        if (strcmp(camp->params->af_range, "fast") == 0) {
+            af_speed = controls::AfSpeedFast;
+        } else {
+            af_speed = controls::AfSpeedNormal;
+        }
+        camp->ctrls->set(controls::AfSpeed, af_speed);
+    }
 
     if (camp->params->roi != NULL) {
         std::optional<Rectangle> opt = camp->camera->properties().get(properties::ScalerCropMaximum);
@@ -321,17 +379,39 @@ bool camera_start(camera_t *cam) {
             camp->params->roi->width * sensor_area.width,
             camp->params->roi->height * sensor_area.height);
         crop.translateBy(sensor_area.topLeft());
-        ctrls.set(controls::ScalerCrop, crop);
+        camp->ctrls->set(controls::ScalerCrop, crop);
     }
 
-    int64_t frame_time = 1000000 / camp->params->fps;
-    ctrls.set(controls::FrameDurationLimits, Span<const int64_t, 2>({ frame_time, frame_time }));
+    if (camp->params->af_window != NULL) {
+        std::optional<Rectangle> opt = camp->camera->properties().get(properties::ScalerCropMaximum);
+        Rectangle sensor_area;
+        try {
+            sensor_area = opt.value();
+        } catch(const std::bad_optional_access& exc) {
+            set_error("get(ScalerCropMaximum) failed");
+            return false;
+        }
 
-    int res = camp->camera->start(&ctrls);
+        Rectangle afwindows_rectangle[1];
+
+        afwindows_rectangle[0] = Rectangle(
+            camp->params->af_window->x * sensor_area.width,
+            camp->params->af_window->y * sensor_area.height,
+            camp->params->af_window->width * sensor_area.width,
+            camp->params->af_window->height * sensor_area.height);
+
+        afwindows_rectangle[0].translateBy(sensor_area.topLeft());
+        camp->ctrls->set(controls::AfMetering, controls::AfMeteringWindows);
+        camp->ctrls->set(controls::AfWindows, afwindows_rectangle);
+    }
+
+    int res = camp->camera->start(camp->ctrls.get());
     if (res != 0) {
         set_error("Camera.start() failed");
         return false;
     }
+
+    camp->ctrls->clear();
 
     camp->camera->requestCompleted.connect(on_request_complete);
 
@@ -344,4 +424,11 @@ bool camera_start(camera_t *cam) {
     }
 
     return true;
+}
+
+void camera_reload_params(camera_t *cam, const parameters_t *params) {
+    CameraPriv *camp = (CameraPriv *)cam;
+
+    std::lock_guard<std::mutex> lock(camp->ctrls_mutex);
+    fill_dynamic_controls(camp->ctrls.get(), params);
 }

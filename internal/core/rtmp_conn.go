@@ -422,14 +422,16 @@ func (c *rtmpConn) runRead(ctx context.Context, u *url.URL) error {
 	defer res.stream.readerRemove(c)
 
 	c.log(logger.Info, "is reading from path '%s', %s",
-		path.Name(), sourceMediaInfo(medias))
+		path.name, sourceMediaInfo(medias))
 
-	if path.Conf().RunOnRead != "" {
+	pathConf := path.safeConf()
+
+	if pathConf.RunOnRead != "" {
 		c.log(logger.Info, "runOnRead command started")
 		onReadCmd := externalcmd.NewCmd(
 			c.externalCmdPool,
-			path.Conf().RunOnRead,
-			path.Conf().RunOnReadRestart,
+			pathConf.RunOnRead,
+			pathConf.RunOnReadRestart,
 			path.externalCmdEnv(),
 			func(co int) {
 				c.log(logger.Info, "runOnRead command exited with code %d", co)
@@ -530,7 +532,7 @@ func (c *rtmpConn) runPublish(ctx context.Context, u *url.URL) error {
 	}
 
 	c.log(logger.Info, "is publishing to path '%s', %s",
-		path.Name(),
+		path.name,
 		sourceMediaInfo(medias))
 
 	// disable write deadline to allow outgoing acknowledges
@@ -571,6 +573,10 @@ func (c *rtmpConn) runPublish(ctx context.Context, u *url.URL) error {
 
 		switch tmsg := msg.(type) {
 		case *message.MsgVideo:
+			if videoFormat == nil {
+				return fmt.Errorf("received a video packet, but track is not set up")
+			}
+
 			if tmsg.H264Type == flvio.AVC_SEQHDR {
 				var conf h264conf.Conf
 				err = conf.Unmarshal(tmsg.Payload)
@@ -592,10 +598,6 @@ func (c *rtmpConn) runPublish(ctx context.Context, u *url.URL) error {
 					c.log(logger.Warn, "%v", err)
 				}
 			} else if tmsg.H264Type == flvio.AVC_NALU {
-				if videoFormat == nil {
-					return fmt.Errorf("received a video packet, but track is not set up")
-				}
-
 				au, err := h264.AVCCUnmarshal(tmsg.Payload)
 				if err != nil {
 					c.log(logger.Warn, "unable to decode AVCC: %v", err)
@@ -606,11 +608,11 @@ func (c *rtmpConn) runPublish(ctx context.Context, u *url.URL) error {
 			}
 
 		case *message.MsgAudio:
-			if tmsg.AACType == flvio.AAC_RAW {
-				if audioFormat == nil {
-					return fmt.Errorf("received an audio packet, but track is not set up")
-				}
+			if audioFormat == nil {
+				return fmt.Errorf("received an audio packet, but track is not set up")
+			}
 
+			if tmsg.AACType == flvio.AAC_RAW {
 				err := rres.stream.writeData(audioMedia, audioFormat, &formatprocessor.DataMPEG4Audio{
 					PTS: tmsg.DTS,
 					AUs: [][]byte{tmsg.Payload},
@@ -640,6 +642,8 @@ func (c *rtmpConn) authenticate(
 			query.Get("user"),
 			query.Get("pass"),
 			pathName,
+			externalAuthProtoRTMP,
+			&c.uuid,
 			isPublishing,
 			rawQuery)
 		if err != nil {

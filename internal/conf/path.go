@@ -1,9 +1,9 @@
 package conf
 
 import (
-	"encoding/json"
 	"fmt"
 	gourl "net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -73,6 +73,11 @@ type PathConf struct {
 	RPICameraBitrate           int            `json:"rpiCameraBitrate"`
 	RPICameraProfile           string         `json:"rpiCameraProfile"`
 	RPICameraLevel             string         `json:"rpiCameraLevel"`
+	RPICameraAfMode            string         `json:"rpiCameraAfMode"`
+	RPICameraAfRange           string         `json:"rpiCameraAfRange"`
+	RPICameraAfSpeed           string         `json:"rpiCameraAfSpeed"`
+	RPICameraLensPosition      float64        `json:"rpiCameraLensPosition"`
+	RPICameraAfWindow          string         `json:"rpiCameraAfWindow"`
 
 	// authentication
 	PublishUser Credential `json:"publishUser"`
@@ -315,7 +320,5 @@ func (pconf *PathConf) checkAndFillMissing(conf *Conf, name string) error {
 
 // Equal checks whether two PathConfs are equal.
 func (pconf *PathConf) Equal(other *PathConf) bool {
-	a, _ := json.Marshal(pconf)
-	b, _ := json.Marshal(other)
-	return string(a) == string(b)
+	return reflect.DeepEqual(pconf, other)
 }
