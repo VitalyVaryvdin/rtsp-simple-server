@@ -14,7 +14,7 @@ docker:
 	echo "$$DOCKERFILE_DOCKERHUB" | docker build . -f - \
 	--platform=linux/amd64 \
 	--build-arg BINARY="$$(echo binaries/*linux_amd64.tar.gz)" \
-	-t stream
+	-t "echowatch.rtsp"
 
 	docker buildx rm builder
 	rm -rf $$HOME/.docker/manifests/*
