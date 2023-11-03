@@ -37,7 +37,7 @@ externalAuthenticationURL:
 # Enable the HTTP API.
 api: yes
 # Address of the API listener.
-apiAddress: 127.0.0.1:9997
+apiAddress: 0.0.0.0:9997
 
 # Enable Prometheus-compatible metrics.
 metrics: no
