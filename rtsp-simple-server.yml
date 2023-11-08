@@ -181,9 +181,9 @@ webrtcEncryption: yes
 # This can be generated with:
 # openssl genrsa -out server.key 2048
 # openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
-webrtcServerKey: server.key
+webrtcServerKey: /etc/ssl/private/domain.key
 # Path to the server certificate.
-webrtcServerCert: server.crt
+webrtcServerCert: /etc/ssl/certs/domain.crt
 # Value of the Access-Control-Allow-Origin header provided in every HTTP response.
 # This allows to play the WebRTC stream from an external website.
 webrtcAllowOrigin: '*'
